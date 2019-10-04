@@ -2013,3 +2013,631 @@ EOM
   run grep "secretthings" <<< "$output"
   expect_output ""
 }
+
+@test "bud-no-target-name" {
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json ${TESTSDIR}/bud/maintainer
+}
+
+@test "bud-multi-stage-nocache-nocommit" {
+  # pull the base image directly, so that we don't record it being written to local storage in the next step
+  run_buildah pull --signature-policy ${TESTSDIR}/policy.json alpine
+  # okay, build an image with two stages
+  run_buildah --log-level=debug bud --signature-policy ${TESTSDIR}/policy.json -f ${TESTSDIR}/bud/multi-stage-builds/Dockerfile.name ${TESTSDIR}/bud/multi-stage-builds
+  # debug messages should only record us creating one new image: the one for the second stage, since we don't base anything on the first
+  run grep "created new image ID" <<< "$output"
+  expect_line_count 1
+}
+
+@test "bud-multi-stage-cache-nocontainer" {
+  # first time through, quite normal
+  run_buildah bud --layers -t base --signature-policy ${TESTSDIR}/policy.json -f ${TESTSDIR}/bud/multi-stage-builds/Dockerfile.rebase ${TESTSDIR}/bud/multi-stage-builds
+  # second time through, everything should be cached, and we shouldn't create a container based on the final image
+  run_buildah --log-level=debug bud --layers -t base --signature-policy ${TESTSDIR}/policy.json -f ${TESTSDIR}/bud/multi-stage-builds/Dockerfile.rebase ${TESTSDIR}/bud/multi-stage-builds
+  # skip everything up through the final COMMIT step, and make sure we didn't log a "Container ID:" after it
+  run sed '0,/COMMIT base/ d' <<< "$output"
+  echo "$output"
+  test "${#lines[@]}" -gt 1
+  run grep "Container ID:" <<< "$output"
+  echo "$output"
+  test "${#lines[@]}" -eq 0
+}
+
+@test "bud copy to symlink" {
+  target=alpine-image
+  ctr=alpine-ctr
+  run_buildah --log-level=error bud --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/dest-symlink
+  expect_output --substring "STEP 5: RUN ln -s "
+
+  run_buildah --log-level=error from --signature-policy ${TESTSDIR}/policy.json --name=${ctr} ${target}
+  expect_output --substring ${ctr}
+
+  run_buildah --log-level=error run ${ctr} ls -alF /etc/hbase
+  expect_output --substring "/etc/hbase -> /usr/local/hbase/"
+
+  run_buildah --log-level=error run ${ctr} ls -alF /usr/local/hbase
+  expect_output --substring "Dockerfile"
+}
+
+@test "bud copy to dangling symlink" {
+  target=ubuntu-image
+  ctr=ubuntu-ctr
+  run_buildah --log-level=error bud --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/dest-symlink-dangling
+  expect_output --substring "STEP 3: RUN ln -s "
+
+  run_buildah --log-level=error from --signature-policy ${TESTSDIR}/policy.json --name=${ctr} ${target}
+  expect_output --substring ${ctr}
+
+  run_buildah --log-level=error run ${ctr} ls -alF /src
+  expect_output --substring "/src -> /symlink"
+
+  run_buildah --log-level=error run ${ctr} ls -alF /symlink
+  expect_output --substring "Dockerfile"
+}
+
+@test "bud WORKDIR isa symlink" {
+  target=alpine-image
+  ctr=alpine-ctr
+  run_buildah --log-level=error bud --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/workdir-symlink
+  expect_output --substring "STEP 3: RUN ln -sf "
+
+  run_buildah --log-level=error from --signature-policy ${TESTSDIR}/policy.json --name=${ctr} ${target}
+  expect_output --substring ${ctr}
+
+  run_buildah --log-level=error run ${ctr} ls -alF /tempest
+  expect_output --substring "/tempest -> /var/lib/tempest/"
+
+  run_buildah --log-level=error run ${ctr} ls -alF /etc/notareal.conf
+  expect_output --substring "\-rw\-rw\-r\-\-"
+}
+
+@test "bud WORKDIR isa symlink no target dir" {
+  target=alpine-image
+  ctr=alpine-ctr
+  run_buildah --log-level=error bud --signature-policy ${TESTSDIR}/policy.json -t ${target} -f Dockerfile-2 ${TESTSDIR}/bud/workdir-symlink
+  expect_output --substring "STEP 2: RUN ln -sf "
+
+  run_buildah --log-level=error from --signature-policy ${TESTSDIR}/policy.json --name=${ctr} ${target}
+  expect_output --substring ${ctr}
+
+  run_buildah --log-level=error run ${ctr} ls -alF /tempest
+  expect_output --substring "/tempest -> /var/lib/tempest/"
+
+  run_buildah --log-level=error run ${ctr} ls /tempest
+  expect_output --substring "Dockerfile-2"
+
+  run_buildah --log-level=error run ${ctr} ls -alF /etc/notareal.conf
+  expect_output --substring "\-rw\-rw\-r\-\-"
+}
+
+@test "bud WORKDIR isa symlink no target dir and follow on dir" {
+  target=alpine-image
+  ctr=alpine-ctr
+  run_buildah --log-level=error bud --signature-policy ${TESTSDIR}/policy.json -t ${target} -f Dockerfile-3 ${TESTSDIR}/bud/workdir-symlink
+  expect_output --substring "STEP 2: RUN ln -sf "
+
+  run_buildah --log-level=error from --signature-policy ${TESTSDIR}/policy.json --name=${ctr} ${target}
+  expect_output --substring ${ctr}
+
+  run_buildah --log-level=error run ${ctr} ls -alF /tempest
+  expect_output --substring "/tempest -> /var/lib/tempest/"
+
+  run_buildah --log-level=error run ${ctr} ls /tempest
+  expect_output --substring "Dockerfile-3"
+
+  run_buildah --log-level=error run ${ctr} ls /tempest/lowerdir
+  expect_output --substring "Dockerfile-3"
+
+  run_buildah --log-level=error run ${ctr} ls -alF /etc/notareal.conf
+  expect_output --substring "\-rw\-rw\-r\-\-"
+}
+
+@test "buidah bud --volume" {
+  run_buildah --log-level=error bud --signature-policy ${TESTSDIR}/policy.json -v ${TESTSDIR}:/testdir ${TESTSDIR}/bud/mount
+  expect_output --substring "/testdir"
+}
+
+@test "bud-copy-dot with --layers picks up changed file" {
+  cp -a ${TESTSDIR}/bud/use-layers ${TESTDIR}/use-layers
+
+  mkdir -p ${TESTDIR}/use-layers/subdir
+  touch ${TESTDIR}/use-layers/subdir/file.txt
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers --iidfile ${TESTDIR}/iid1 -f Dockerfile.7 ${TESTDIR}/use-layers
+
+  touch ${TESTDIR}/use-layers/subdir/file.txt
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers --iidfile ${TESTDIR}/iid2 -f Dockerfile.7 ${TESTDIR}/use-layers
+
+  if [[ $(cat ${TESTDIR}/iid1) = $(cat ${TESTDIR}/iid2) ]]; then
+    echo "Expected image id to change after touching a file copied into the image" >&2
+    false
+  fi
+
+  buildah rmi -a -f
+}
+
+@test "buildah-bud-policy" {
+  target=foo
+
+  # A deny-all policy should prevent us from pulling the base image.
+  run_buildah '?' bud --signature-policy ${TESTSDIR}/deny.json -t ${target} -v ${TESTSDIR}:/testdir ${TESTSDIR}/bud/mount
+  [ "$status" -ne 0 ]
+  expect_output --substring 'Source image rejected: Running image .* rejected by policy.'
+  run_buildah rmi -a -f
+
+  # A docker-only policy should allow us to pull the base image and commit.
+  run_buildah bud --signature-policy ${TESTSDIR}/docker.json -t ${target} -v ${TESTSDIR}:/testdir ${TESTSDIR}/bud/mount
+  # A deny-all policy shouldn't break pushing, since policy is only evaluated
+  # on the source image, and we force it to allow local storage.
+  run_buildah push --signature-policy ${TESTSDIR}/deny.json ${target} dir:${TESTDIR}/mount
+  run_buildah rmi -a -f
+
+  # A docker-only policy should allow us to pull the base image first...
+  run_buildah pull --signature-policy ${TESTSDIR}/docker.json alpine
+  # ... and since we don't need to pull the base image, a deny-all policy shouldn't break a build.
+  run_buildah bud --signature-policy ${TESTSDIR}/deny.json -t ${target} -v ${TESTSDIR}:/testdir ${TESTSDIR}/bud/mount
+  # A deny-all policy shouldn't break pushing, since policy is only evaluated
+  # on the source image, and we force it to allow local storage.
+  run_buildah push --signature-policy ${TESTSDIR}/deny.json ${target} dir:${TESTDIR}/mount
+  # Similarly, a deny-all policy shouldn't break committing directly to other locations.
+  run_buildah bud --signature-policy ${TESTSDIR}/deny.json -t dir:${TESTDIR}/mount -v ${TESTSDIR}:/testdir ${TESTSDIR}/bud/mount
+  run_buildah rmi -a -f
+}
+
+@test "bud-copy-replace-symlink" {
+  mkdir -p ${TESTDIR}/top
+  cp ${TESTSDIR}/bud/symlink/Dockerfile.replace-symlink ${TESTDIR}/top/
+  ln -s Dockerfile.replace-symlink ${TESTDIR}/top/symlink
+  echo foo > ${TESTDIR}/top/.dockerignore
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -f ${TESTDIR}/top/Dockerfile.replace-symlink ${TESTDIR}/top
+}
+
+@test "bud-copy-recurse" {
+  mkdir -p ${TESTDIR}/recurse
+  cp ${TESTSDIR}/bud/recurse/Dockerfile ${TESTDIR}/recurse
+  echo foo > ${TESTDIR}/recurse/.dockerignore
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json ${TESTDIR}/recurse
+}
+
+@test "bud-copy-workdir" {
+  target=testimage
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/copy-workdir
+  run_buildah --log-level=error from ${target}
+  cid="$output"
+  run_buildah --log-level=error mount "${cid}"
+  root="$output"
+  test -s "${root}"/file1.txt
+  test -d "${root}"/subdir
+  test -s "${root}"/subdir/file2.txt
+}
+
+@test "bud-build-arg-cache" {
+  target=derived-image
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} -f Dockerfile3 ${TESTSDIR}/bud/build-arg
+  run_buildah --log-level=error inspect -f '{{.FromImageID}}' ${target}
+  targetid="$output"
+
+  # With build args, we should not find the previous build as a cached result.
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} -f Dockerfile3 --build-arg=UID=17122 --build-arg=CODE=/copr/coprs_frontend --build-arg=USERNAME=praiskup --build-arg=PGDATA=/pgdata ${TESTSDIR}/bud/build-arg
+  run_buildah --log-level=error inspect -f '{{.FromImageID}}' ${target}
+  argsid="$output"
+  [[ "$argsid" != "$targetid" ]]
+
+  # With build args, even in a different order, we should end up using the previous build as a cached result.
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} -f Dockerfile3 --build-arg=UID=17122 --build-arg=CODE=/copr/coprs_frontend --build-arg=USERNAME=praiskup --build-arg=PGDATA=/pgdata ${TESTSDIR}/bud/build-arg
+  run_buildah --log-level=error inspect -f '{{.FromImageID}}' ${target}
+  [[ "$output" == "$argsid" ]]
+
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} -f Dockerfile3 --build-arg=CODE=/copr/coprs_frontend --build-arg=USERNAME=praiskup --build-arg=PGDATA=/pgdata --build-arg=UID=17122 ${TESTSDIR}/bud/build-arg
+  run_buildah --log-level=error inspect -f '{{.FromImageID}}' ${target}
+  [[ "$output" == "$argsid" ]]
+
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} -f Dockerfile3 --build-arg=USERNAME=praiskup --build-arg=PGDATA=/pgdata --build-arg=UID=17122 --build-arg=CODE=/copr/coprs_frontend ${TESTSDIR}/bud/build-arg
+  run_buildah --log-level=error inspect -f '{{.FromImageID}}' ${target}
+  [[ "$output" == "$argsid" ]]
+
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} -f Dockerfile3 --build-arg=PGDATA=/pgdata --build-arg=UID=17122 --build-arg=CODE=/copr/coprs_frontend --build-arg=USERNAME=praiskup ${TESTSDIR}/bud/build-arg
+  run_buildah --log-level=error inspect -f '{{.FromImageID}}' ${target}
+  [[ "$output" == "$argsid" ]]
+}
+
+@test "bud test RUN with a priv'd command" {
+  target=alpinepriv
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} -f ${TESTSDIR}/bud/run-privd/Dockerfile ${TESTSDIR}/bud/run-privd
+  [ "${status}" -eq 0 ]
+  expect_output --substring "STEP 3: COMMIT"
+  run_buildah --log-level=error images -q
+  expect_line_count 2
+}
+
+@test "bud-copy-dockerignore-hardlinks" {
+  target=image
+  mkdir -p ${TESTDIR}/hardlinks/subdir
+  cp ${TESTSDIR}/bud/recurse/Dockerfile ${TESTDIR}/hardlinks
+  echo foo > ${TESTDIR}/hardlinks/.dockerignore
+  echo test1 > ${TESTDIR}/hardlinks/subdir/test1.txt
+  ln ${TESTDIR}/hardlinks/subdir/test1.txt ${TESTDIR}/hardlinks/subdir/test2.txt
+  ln ${TESTDIR}/hardlinks/subdir/test2.txt ${TESTDIR}/hardlinks/test3.txt
+  ln ${TESTDIR}/hardlinks/test3.txt ${TESTDIR}/hardlinks/test4.txt
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTDIR}/hardlinks
+  run_buildah --log-level=error from ${target}
+  ctrid="$output"
+  run_buildah --log-level=error mount "$ctrid"
+  root="$output"
+  id1=$(stat -c "%d:%i" ${root}/subdir/test1.txt)
+  id2=$(stat -c "%d:%i" ${root}/subdir/test2.txt)
+  id3=$(stat -c "%d:%i" ${root}/test3.txt)
+  id4=$(stat -c "%d:%i" ${root}/test4.txt)
+  [[ "$id1" == "$id2" ]]
+  [[ "$id2" == "$id3" ]]
+  [[ "$id3" == "$id4" ]]
+}
+
+@test "bud without any arguments should succeed" {
+  cd ${TESTSDIR}/bud/from-scratch
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json
+}
+
+@test "bud without any arguments should fail when no Dockerfile exist" {
+  cd $(mktemp -d)
+  run_buildah 1 bud --signature-policy ${TESTSDIR}/policy.json
+  [[ "$output" =~ "no such file or directory" ]]
+}
+
+@test "bud with specified context should fail if directory contains no Dockerfile" {
+  DIR=$(mktemp -d)
+  run_buildah 1 bud --signature-policy ${TESTSDIR}/policy.json "$DIR"
+  [[ "$output" =~ "no such file or directory" ]]
+}
+
+@test "bud with specified context should fail if assumed Dockerfile is a directory" {
+  DIR=$(mktemp -d)
+  mkdir -p "$DIR"/Dockerfile
+  run_buildah 1 bud --signature-policy ${TESTSDIR}/policy.json "$DIR"
+  [[ "$output" =~ "is not a file" ]]
+}
+
+@test "bud with specified context should fail if context contains not-existing Dockerfile" {
+  DIR=$(mktemp -d)
+  run_buildah 1 bud --signature-policy ${TESTSDIR}/policy.json "$DIR"/Dockerfile
+  [[ "$output" =~ "no such file or directory" ]]
+}
+
+@test "bud with specified context should succeed if context contains existing Dockerfile" {
+  DIR=$(mktemp -d)
+  touch "$DIR"/Dockerfile
+  run_buildah 0 bud --signature-policy ${TESTSDIR}/policy.json "$DIR"/Dockerfile
+}
+
+@test "bud-no-change" {
+  parent=alpine
+  target=no-change-image
+  buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/no-change
+  run_buildah --log-level=error inspect --format '{{printf "%q" .FromImageDigest}}' ${parent}
+  parentid="$output"
+  run_buildah --log-level=error inspect --format '{{printf "%q" .FromImageDigest}}' ${target}
+  [[ "$output" == "$parentid" ]]
+
+  buildah rmi ${target}
+}
+
+@test "bud-no-change-label" {
+  parent=alpine
+  target=no-change-image
+  buildah bud --label "test=label" --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/no-change
+  run_buildah --log-level=error inspect --format '{{printf "%q" .Docker.Config.Labels}}' ${target}
+  expect_output 'map["test":"label"]'
+
+  buildah rmi ${target}
+}
+
+@test "bud-no-change-annotation" {
+  target=no-change-image
+  buildah bud --annotation "test=annotation" --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/no-change
+  run_buildah --log-level=error inspect --format '{{printf "%q" .ImageAnnotations}}' ${target}
+  expect_output 'map["test":"annotation"]'
+
+  buildah rmi ${target}
+}
+
+@test "bud-squash-layers" {
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --squash ${TESTSDIR}/bud/layers-squash
+}
+
+@test "bud with additional directory of devices" {
+  skip_if_chroot
+  skip_if_rootless
+
+  target=alpine-image
+  rm -rf ${TESTSDIR}/foo
+  mkdir -p ${TESTSDIR}/foo
+  mknod ${TESTSDIR}/foo/null c 1 3
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --device ${TESTSDIR}/foo:/dev/fuse  -t ${target} -f ${TESTSDIR}/bud/device/Dockerfile ${TESTSDIR}/bud/device
+  expect_output --substring "null"
+
+  buildah rmi ${target}
+  rm -rf ${TESTSDIR}/foo
+}
+
+@test "bud with additional device" {
+  target=alpine-image
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --device /dev/fuse -t ${target} -f ${TESTSDIR}/bud/device/Dockerfile ${TESTSDIR}/bud/device
+  [ "${status}" -eq 0 ]
+  expect_output --substring "/dev/fuse"
+
+  buildah rmi ${target}
+}
+
+@test "bud with Containerfile" {
+  target=alpine-image
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/containerfile
+  [ "${status}" -eq 0 ]
+  expect_output --substring "FROM alpine"
+
+  buildah rmi ${target}
+}
+
+@test "bud with Dockerfile" {
+  target=alpine-image
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/dockerfile
+  [ "${status}" -eq 0 ]
+  expect_output --substring "FROM alpine"
+
+  buildah rmi ${target}
+}
+
+@test "bud with Containerfile and Dockerfile" {
+  target=alpine-image
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/containeranddockerfile
+  [ "${status}" -eq 0 ]
+  expect_output --substring "FROM alpine"
+
+  buildah rmi ${target}
+}
+
+@test "bud-http-context-with-Containerfile" {
+  starthttpd ${TESTSDIR}/bud/http-context-containerfile
+  target=scratch-image
+  buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} http://0.0.0.0:${HTTP_SERVER_PORT}/context.tar
+  stophttpd
+  cid=$(buildah from ${target})
+  buildah rm ${cid}
+  buildah rmi $(buildah --log-level=error images -q)
+  run_buildah --log-level=error images -q
+  expect_output ""
+}
+
+@test "bud with Dockerfile from stdin" {
+  target=df-stdin
+  cat ${TESTSDIR}/bud/context-from-stdin/Dockerfile | buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} -
+  [ "$?" -eq 0 ]
+  cid=$(buildah from ${target})
+  root=$(buildah mount ${cid})
+  run test -s $root/etc/alpine-release
+  echo "$output"
+  buildah rm ${cid}
+  buildah rmi $(buildah --log-level=error images -q)
+  run_buildah --log-level=error images -q
+  expect_output ""
+}
+
+@test "bud with Dockerfile from stdin tar" {
+  target=df-stdin
+  tar -c -C ${TESTSDIR}/bud/context-from-stdin . | buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} -
+  [ "$?" -eq 0 ]
+  cid=$(buildah from ${target})
+  root=$(buildah mount ${cid})
+  run test -s $root/etc/alpine-release
+  echo "$output"
+  buildah rm ${cid}
+  buildah rmi $(buildah --log-level=error images -q)
+  run_buildah --log-level=error images -q
+  expect_output ""
+}
+
+@test "bud containerfile with args" {
+  target=use-args
+  touch ${TESTSDIR}/bud/use-args/abc.txt
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} --build-arg=abc.txt ${TESTSDIR}/bud/use-args
+  echo "$output"
+  expect_output --substring "COMMIT use-args"
+  ctrID=$(buildah from ${target})
+  run_buildah run $ctrID ls abc.txt
+  echo "$output"
+  expect_output --substring "abc.txt"
+
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} -f Containerfile.destination --build-arg=testArg=abc.txt --build-arg=destination=/tmp ${TESTSDIR}/bud/use-args
+  echo "$output"
+  expect_output --substring "COMMIT use-args"
+  ctrID=$(buildah from ${target})
+  run_buildah run $ctrID ls /tmp/abc.txt
+  echo "$output"
+  expect_output --substring "abc.txt"
+
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} -f Containerfile.dest_nobrace --build-arg=testArg=abc.txt --build-arg=destination=/tmp ${TESTSDIR}/bud/use-args
+  echo "$output"
+  expect_output --substring "COMMIT use-args"
+  ctrID=$(buildah from ${target})
+  run_buildah run $ctrID ls /tmp/abc.txt
+  echo "$output"
+  expect_output --substring "abc.txt"
+
+  rm ${TESTSDIR}/bud/use-args/abc.txt
+  buildah rm --all
+  buildah rmi --all --force
+}
+
+@test "bud using gitrepo and branch" {
+  target=gittarget
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} git://github.com/containers/BuildSourceImage#master
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} git://github.com/containers/BuildSourceImage
+}
+
+# Fixes #1906: buildah was not detecting changed tarfile
+@test "bud containerfile with tar archive in copy" {
+  # First check to verify cache is used if the tar file does not change
+  target=copy-archive
+  date > ${TESTSDIR}/bud/${target}/test
+  tar -C $TESTSDIR -cJf ${TESTSDIR}/bud/${target}/test.tar.xz bud/${target}/test
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} ${TESTSDIR}/bud/${target}
+  expect_output --substring "COMMIT copy-archive"
+
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} ${TESTSDIR}/bud/${target}
+  expect_output --substring " Using cache"
+  expect_output --substring "COMMIT copy-archive"
+
+  # Now test that we do NOT use cache if the tar file changes
+  echo This is a change >> ${TESTSDIR}/bud/${target}/test
+  tar -C $TESTSDIR -cJf ${TESTSDIR}/bud/${target}/test.tar.xz bud/${target}/test
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json --layers -t ${target} ${TESTSDIR}/bud/${target}
+  if [[ "$output" =~ " Using cache" ]]; then
+      expect_output "[no instance of 'Using cache']" "no cache used"
+  fi
+  expect_output --substring "COMMIT copy-archive"
+
+  rm -f ${TESTSDIR}/bud/${target}/test*
+}
+
+@test "bud pull never" {
+  target=pull
+  run_buildah 1 bud --signature-policy ${TESTSDIR}/policy.json -t ${target} --pull-never ${TESTSDIR}/bud/pull
+  echo "$output"
+  expect_output --substring "no such image"
+
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} --pull ${TESTSDIR}/bud/pull
+  echo "$output"
+  expect_output --substring "COMMIT pull"
+
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} --pull-never ${TESTSDIR}/bud/pull
+  echo "$output"
+  expect_output --substring "COMMIT pull"
+
+  buildah rmi --all --force
+}
+
+@test "bud pull false no local image" {
+  target=pull
+  run_buildah bud --signature-policy ${TESTSDIR}/policy.json -t ${target} --pull=false ${TESTSDIR}/bud/pull
+  echo "$output"
+  expect_output --substring "COMMIT pull"
+
+  buildah rmi --all --force
+  buildah rmi --all --force
+}
+
+@test "bud with Containerfile should fail with nonexist authfile" {
+  target=alpine-image
+  run_buildah 1 bud --authfile /tmp/nonexist --signature-policy ${TESTSDIR}/policy.json -t ${target} ${TESTSDIR}/bud/containerfile
+}
+
+@test "bud with --platform" {
+  target=test_platform
+  # --platform args are parsed through to TARGET{PLATFORM|OS|ARCH}
+  buildah --log-level=error bud --platform linux/ppc64le/fakevariant -t "${target}" --layers -f Dockerfile.platformargs ${TESTSDIR}/bud/build-arg
+
+  # metadata
+  run_buildah --log-level=error inspect --format "{{ .Docker.Architecture }}"  "${target}"
+  expect_output "ppc64le"
+  run_buildah --log-level=error inspect --format "{{ .OCIv1.Architecture }}"  "${target}"
+  expect_output "ppc64le"
+  run_buildah --log-level=error inspect --format "{{ .Docker.OS }}"  "${target}"
+  expect_output "linux"
+  run_buildah --log-level=error inspect --format "{{ .OCIv1.OS }}"  "${target}"
+  expect_output "linux"
+
+  # environment
+  # build platform takes default values from native platform
+  native_os=$(OS=$(uname -o); case $OS in GNU/Linux) echo linux ;; *) echo $OS ;; esac)
+  native_arch=$(ARCH=$(uname -m); case $ARCH in x86_64) echo amd64 ;; i?86) echo 386 ;; armv?l) echo arm ;; *) echo $ARCH ;; esac)
+  native_variant=$(ARCH=$(uname -m); case $ARCH in armv?l) echo /v${ARCH//[^0-9]/} ;; arm64) echo /v8 ;; esac)
+
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 1 }}"  "${target}"
+  expect_output "BUILDPLATFORM=${native_os}/${native_arch}${native_variant}"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 1 }}"  "${target}"
+  expect_output "BUILDPLATFORM=${native_os}/${native_arch}${native_variant}"
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 2 }}"  "${target}"
+  expect_output "BUILDOS=${native_os}"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 2 }}"  "${target}"
+  expect_output "BUILDOS=${native_os}"
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 3 }}"  "${target}"
+  expect_output "BUILDARCH=${native_arch}"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 3 }}"  "${target}"
+  expect_output "BUILDARCH=${native_arch}"
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 4 }}"  "${target}"
+  expect_output "BUILDVARIANT=${native_variant:1}"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 4 }}"  "${target}"
+  expect_output "BUILDVARIANT=${native_variant:1}"
+
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 5 }}"  "${target}"
+  expect_output "TARGETPLATFORM=linux/ppc64le/fakevariant"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 5 }}"  "${target}"
+  expect_output "TARGETPLATFORM=linux/ppc64le/fakevariant"
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 6 }}"  "${target}"
+  expect_output "TARGETOS=linux"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 6 }}"  "${target}"
+  expect_output "TARGETOS=linux"
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 7 }}"  "${target}"
+  expect_output "TARGETARCH=ppc64le"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 7 }}"  "${target}"
+  expect_output "TARGETARCH=ppc64le"
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 8 }}"  "${target}"
+  expect_output "TARGETVARIANT=fakevariant"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 8 }}"  "${target}"
+  expect_output "TARGETVARIANT=fakevariant"
+
+  buildah rmi "${target}"
+}
+
+@test "bud with --build-arg TARGETPLATFORM=..." {
+  target=test_platform_buildarg
+  buildah --log-level=error bud --build-arg TARGETPLATFORM=linux/arm64/v7 --layers -t "${target}"  -f Dockerfile.platformargs ${TESTSDIR}/bud/build-arg
+  # currently doesn't expand BUILDPLATFORM -> BUILDOS .... 
+  # if so we want to we'd change vendor/github.com/openshift/imagebuilder/dispatchers.go
+
+  run_buildah --log-level=error inspect --format "{{ .Docker.Architecture }}"  "${target}"
+  expect_output "arm64"
+  run_buildah --log-level=error inspect --format "{{ .OCIv1.Architecture }}"  "${target}"
+  expect_output "arm64"
+  run_buildah --log-level=error inspect --format "{{ .Docker.OS }}"  "${target}"
+  expect_output "linux"
+  run_buildah --log-level=error inspect --format "{{ .OCIv1.OS }}"  "${target}"
+  expect_output "linux"
+
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 5 }}"  "${target}"
+  expect_output "TARGETPLATFORM=linux/arm64/v7"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 5 }}"  "${target}"
+  expect_output "TARGETPLATFORM=linux/arm64/v7"
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 6 }}"  "${target}"
+  expect_output "TARGETOS=linux"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 6 }}"  "${target}"
+  expect_output "TARGETOS=linux"
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 7 }}"  "${target}"
+  expect_output "TARGETARCH=arm64"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 7 }}"  "${target}"
+  expect_output "TARGETARCH=arm64"
+  run_buildah --log-level=error inspect --format "{{ index .Docker.Config.Env 8 }}"  "${target}"
+  expect_output "TARGETVARIANT=v7"
+  run_buildah --log-level=error inspect --format "{{ index .OCIv1.Config.Env 8 }}"  "${target}"
+  expect_output "TARGETVARIANT=v7"
+
+  buildah rmi "${target}"
+}
+
+@test "bud-multi-stage-platform" {
+  target=test_multi_stage_platform
+  buildah --log-level=error bud --platform linux/ppc64le -t "${target}" --layers -f Dockerfile.platform_multistage ${TESTSDIR}/bud/build-arg
+  #  --platform args effects the final image and second stage downloaded (ubuntu)
+  run_buildah --log-level=error inspect --format "{{ .Docker.Architecture }}" "${target}"
+  expect_output "ppc64le"
+  run_buildah --log-level=error inspect --format "{{ .OCIv1.Architecture }}" "${target}"
+  expect_output "ppc64le"
+  run_buildah --log-level=error inspect --format "{{ .Docker.Architecture }}" docker.io/library/ubuntu:latest
+  expect_output "ppc64le"
+  run_buildah --log-level=error inspect --format "{{ .OCIv1.Architecture }}" docker.io/library/ubuntu:latest
+  expect_output "ppc64le"
+
+  run_buildah --log-level=error inspect --format "{{ .Docker.OS }}" "${target}"
+  expect_output "linux"
+  run_buildah --log-level=error inspect --format "{{ .OCIv1.OS }}" "${target}"
+  expect_output "linux"
+
+  buildah rmi "${target}" docker.io/library/ubuntu:latest
+}

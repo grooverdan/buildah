@@ -96,6 +96,7 @@ func (b *Builder) initConfig(ctx context.Context, img types.Image) error {
 	if b.Args["TARGETVARIANT"] != "" {
 		b.SetVariant(b.Args["TARGETVARIANT"])
 		// TODO else set based on detection
+		// https://github.com/containers/image/issues/876
 	}
 
 	b.fixupConfig()
