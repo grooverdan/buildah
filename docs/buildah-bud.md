@@ -344,7 +344,7 @@ that the PID namespace in which `buildah` itself is being run should be reused,
 or it can be the path to a PID namespace which is already in use by another
 process.
 
-**--platform**="OS/ARCH"
+**--platform**="OS[/arch[/variant]]"
 
 Set the OS/ARCH of the image to the provided value instead of using the current
 operating system and architecture of the host (for example `linux/arm`). If
